@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Stable Image+ZIP Polyglot</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+
+<h2>Encode: (Image, ZIP) → .wav</h2>
+<p>画像: <input type="file" id="imgFile" accept="image/*"></p>
+<p>隠すファイル: <input type="file" id="zipFile"></p>
+<button onclick="encode()">生成して保存</button>
+<p id="encMsg"></p>
+
+<hr>
+
+<h2>Decode: .wav → (.webp, .zip)</h2>
+<p>WAVファイル: <input type="file" id="wavFile"></p>
+<button onclick="decode()">抽出して保存</button>
+<p id="decMsg"></p>
+
+<script>
+const readFile = (f) => new Promise(res => {
+  const r = new FileReader();
+  r.onload = e => res(new Uint8Array(e.target.result));
+  r.readAsArrayBuffer(f);
+});
+
+const MARKER = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]); // WebPとZIPの境界マーカー
+
+async function encode() {
+  const msg = document.getElementById("encMsg");
+  const imgIn = document.getElementById("imgFile");
+  const zipIn = document.getElementById("zipFile");
+
+  if (!imgIn.files[0] || !zipIn.files[0]) {
+    msg.textContent = "ファイルを選択してください";
+    return;
+  }
+  msg.textContent = "処理中...";
+
+  try {
+    // 1. WebP変換（ブラウザネイティブ）
+    const img = await createImageBitmap(imgIn.files[0]);
+    const cvs = document.createElement("canvas");
+    cvs.width = img.width;
+    cvs.height = img.height;
+    cvs.getContext("2d").drawImage(img, 0, 0);
+
+    msg.textContent = "WebPエンコード中...";
+    const webpBlob = await new Promise(res => cvs.toBlob(res, "image/webp", 0.8));
+    const webpBytes = new Uint8Array(await webpBlob.arrayBuffer());
+
+    // 2. ZIPの用意
+    msg.textContent = "ZIP作成中...";
+    let zipBytes = await readFile(zipIn.files[0]);
+    if (!(zipBytes[0] === 0x50 && zipBytes[1] === 0x4B)) {
+      const zip = new JSZip();
+      zip.file(zipIn.files[0].name, zipBytes);
+      zipBytes = await zip.generateAsync({type: "uint8array"});
+    }
+
+    // 3. 結合 [WebP][MARKER][ZIP]
+    const finalBytes = new Uint8Array(webpBytes.length + MARKER.length + zipBytes.length);
+    finalBytes.set(webpBytes, 0);
+    finalBytes.set(MARKER, webpBytes.length);
+    finalBytes.set(zipBytes, webpBytes.length + MARKER.length);
+
+    // 4. .wavとして保存（MIMEは audio/wav）
+    const blob = new Blob([finalBytes], {type: "audio/wav"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "output.wav";
+    a.click();
+    msg.textContent = "完了！ (WebP + ZIP を .wav に収めました)";
+  } catch (e) {
+    msg.textContent = "失敗: " + e;
+    console.error(e);
+  }
+}
+
+async function decode() {
+  const msg = document.getElementById("decMsg");
+  const file = document.getElementById("wavFile").files[0];
+  if (!file) {
+    msg.textContent = "WAVファイルを選択してください";
+    return;
+  }
+
+  try {
+    const data = await readFile(file);
+
+    // MARKER位置を検索
+    let markerIndex = -1;
+    for (let i = 0; i < data.length - MARKER.length; i++) {
+      let match = true;
+      for (let j = 0; j < MARKER.length; j++) {
+        if (data[i + j] !== MARKER[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        markerIndex = i;
+        break;
+      }
+    }
+    if (markerIndex === -1) throw "境界マーカーが見つかりません。";
+
+    const webpPart = data.slice(0, markerIndex);
+    const zipPart = data.slice(markerIndex + MARKER.length);
+
+    const download = (b, name, type) => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([b], {type}));
+      a.download = name;
+      a.click();
+    };
+
+    download(webpPart, "extracted.webp", "image/webp");
+    download(zipPart, "extracted.zip", "application/zip");
+
+    msg.textContent = "抽出成功！WebPは手動リネームでも表示可能です。";
+  } catch (e) {
+    msg.textContent = "失敗: " + e;
+    console.error(e);
+  }
+}
+</script>
+</body>
+</html>
